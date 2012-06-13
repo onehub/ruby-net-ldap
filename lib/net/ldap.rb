@@ -383,6 +383,7 @@ class Net::LDAP
     @verbose = false # Make this configurable with a switch on the class.
     @auth = args[:auth] || DefaultAuth
     @base = args[:base] || DefaultTreebase
+    @timeout = args[:timeout] || 60
     encryption args[:encryption] # may be nil
 
     if pr = @auth[:password] and pr.respond_to?(:call)
@@ -562,7 +563,7 @@ class Net::LDAP
       @open_connection = Net::LDAP::Connection.new(:host => @host,
                                                    :port => @port,
                                                    :encryption =>
-                                                   @encryption)
+                                                   @encryption, :timeout => @timeout)
       @open_connection.bind(@auth)
       yield self
     ensure
@@ -634,7 +635,7 @@ class Net::LDAP
     else
       begin
         conn = Net::LDAP::Connection.new(:host => @host, :port => @port,
-                                         :encryption => @encryption)
+                                         :encryption => @encryption, :timeout => @timeout)
         if (@result = conn.bind(args[:auth] || @auth)).result_code == 0
           @result = conn.search(args) { |entry|
             result_set << entry if result_set
@@ -716,7 +717,7 @@ class Net::LDAP
     else
       begin
         conn = Connection.new(:host => @host, :port => @port,
-                              :encryption => @encryption)
+                              :encryption => @encryption, :timeout => @timeout)
         @result = conn.bind(auth)
       ensure
         conn.close if conn
@@ -817,7 +818,7 @@ class Net::LDAP
       @result = 0
       begin
         conn = Connection.new(:host => @host, :port => @port,
-                              :encryption => @encryption)
+                              :encryption => @encryption, :timeout => @timeout)
         if (@result = conn.bind(args[:auth] || @auth)).result_code == 0
           @result = conn.add(args)
         end
@@ -915,7 +916,7 @@ class Net::LDAP
       @result = 0
       begin
         conn = Connection.new(:host => @host, :port => @port,
-                              :encryption => @encryption)
+                              :encryption => @encryption, :timeout => @timeout)
         if (@result = conn.bind(args[:auth] || @auth)).result_code == 0
           @result = conn.modify(args)
         end
@@ -987,7 +988,7 @@ class Net::LDAP
       @result = 0
       begin
         conn = Connection.new(:host => @host, :port => @port,
-                              :encryption => @encryption)
+                              :encryption => @encryption, :timeout => @timeout)
         if (@result = conn.bind(args[:auth] || @auth)).result_code == 0
           @result = conn.rename(args)
         end
@@ -1015,7 +1016,7 @@ class Net::LDAP
       @result = 0
       begin
         conn = Connection.new(:host => @host, :port => @port,
-                              :encryption => @encryption)
+                              :encryption => @encryption, :timeout => @timeout)
         if (@result = conn.bind(args[:auth] || @auth)).result_code == 0
           @result = conn.delete(args)
         end
@@ -1119,9 +1120,34 @@ class Net::LDAP::Connection #:nodoc:
   LdapVersion = 3
   MaxSaslChallenges = 10
 
+  def socket_connect_with_timeout(host, port, timeout=nil)
+      addr = Socket.getaddrinfo(host, nil)
+      sock = Socket.new(Socket.const_get(addr[0][0]), Socket::SOCK_STREAM, 0)
+
+      if timeout
+        secs = Integer(timeout)
+        usecs = Integer((timeout - secs) * 1_000_000)
+        optval = [secs, usecs].pack("l_2")
+
+        sock.setsockopt Socket::SOL_SOCKET, Socket::SO_RCVTIMEO, optval
+        sock.setsockopt Socket::SOL_SOCKET, Socket::SO_SNDTIMEO, optval
+      end
+
+      begin
+        sock.connect_nonblock(Socket.pack_sockaddr_in(port, addr[0][3]))
+      rescue Errno::EINPROGRESS => ex
+        rzult = select([sock], [sock], [sock], timeout)
+        if !rzult
+          raise Errno::ETIMEDOUT, "Timeout #{timeout ? "(#{timeout} seconds)" : "(default)"} exceeded"
+        end
+      end
+      return sock
+  end
+
   def initialize(server)
     begin
-      @conn = TCPSocket.new(server[:host], server[:port])
+      @conn = socket_connect_with_timeout(server[:host], server[:port], server[:timeout])
+      #@conn = TCPSocket.new(server[:host], server[:port])
     rescue SocketError
       raise Net::LDAP::LdapError, "No such address or other socket error."
     rescue Errno::ECONNREFUSED
